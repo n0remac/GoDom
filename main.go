@@ -40,12 +40,18 @@ func main() {
 
 	// Create a new HTTP server
 	mux := http.NewServeMux()
+	imageHandler, err := ds.ImageHandler("/images/")
+	if err != nil {
+		log.Fatalf("failed to configure image handler: %v", err)
+	}
+	mux.Handle("/images/", imageHandler)
+
 	// create global registry
 	globalRegistry := NewCommandRegistry()
 	mux.HandleFunc("/ws/hub", CreateWebsocket(globalRegistry))
 
 	// Apps
-	Home(mux, globalRegistry)
+	Home(mux, globalRegistry, ds)
 
 	authApp := auth.AuthWithStores(mux, globalRegistry, store, store)
 	admin.Mount(mux, authApp)

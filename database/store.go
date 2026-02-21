@@ -5,18 +5,31 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	_ "github.com/glebarez/go-sqlite"
 )
 
+const defaultImageDir = "data/images"
+
 type DocumentStore struct {
-	db *sql.DB
+	db       *sql.DB
+	imageDir string
 }
 
 // NewSQLiteStoreFromDSN opens a sqlite database and ensures the documents table exists.
 // Example DSN: ":memory:" or "./data/db.sqlite"
 func NewSQLiteStoreFromDSN(dsn string) (*DocumentStore, error) {
+	return NewSQLiteStoreFromDSNWithImageDir(dsn, defaultImageDir)
+}
+
+// NewSQLiteStoreFromDSNWithImageDir opens a sqlite database and configures where image files are stored.
+// If imageDir is empty, data/images is used.
+func NewSQLiteStoreFromDSNWithImageDir(dsn, imageDir string) (*DocumentStore, error) {
+	if strings.TrimSpace(imageDir) == "" {
+		imageDir = defaultImageDir
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -26,8 +39,12 @@ func NewSQLiteStoreFromDSN(dsn string) (*DocumentStore, error) {
 		// non-fatal; continue
 	}
 
-	s := &DocumentStore{db: db}
+	s := &DocumentStore{db: db, imageDir: imageDir}
 	if err := s.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.ensureImageDir(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -42,7 +59,19 @@ func (s *DocumentStore) migrate(ctx context.Context) error {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );`
-	_, err := s.db.ExecContext(ctx, q)
+	if _, err := s.db.ExecContext(ctx, q); err != nil {
+		return err
+	}
+
+	imageTable := `CREATE TABLE IF NOT EXISTS images (
+        path TEXT PRIMARY KEY,
+        original_name TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );`
+	_, err := s.db.ExecContext(ctx, imageTable)
 	return err
 }
 
