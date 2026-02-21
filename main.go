@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/n0remac/GoDom/admin"
 	"github.com/n0remac/GoDom/auth"
 	"github.com/n0remac/GoDom/database"
 	. "github.com/n0remac/GoDom/websocket"
@@ -15,15 +16,6 @@ const (
 )
 
 func main() {
-	// Create a new HTTP server
-	mux := http.NewServeMux()
-	// create global registry
-	globalRegistry := NewCommandRegistry()
-	mux.HandleFunc("/ws/hub", CreateWebsocket(globalRegistry))
-
-	// Apps
-	Home(mux, globalRegistry)
-
 	// Setup database-backed auth
 	if err := os.MkdirAll("data", 0755); err != nil {
 		log.Fatalf("failed to create data dir: %v", err)
@@ -34,7 +26,36 @@ func main() {
 	}
 	defer ds.Close()
 	store := auth.NewSQLiteStore(ds)
-	auth.AuthWithStores(mux, globalRegistry, store, store)
+
+	handled, message, err := admin.HandleCLI(store, os.Args[1:], os.Args[0])
+	if err != nil {
+		log.Fatal(err)
+	}
+	if message != "" {
+		log.Print(message)
+	}
+	if handled {
+		return
+	}
+
+	// Create a new HTTP server
+	mux := http.NewServeMux()
+	// create global registry
+	globalRegistry := NewCommandRegistry()
+	mux.HandleFunc("/ws/hub", CreateWebsocket(globalRegistry))
+
+	// Apps
+	Home(mux, globalRegistry)
+
+	authApp := auth.AuthWithStores(mux, globalRegistry, store, store)
+	admin.Mount(mux, authApp)
+
+	warning, err := admin.MissingAdminWarning(store, os.Args[0])
+	if err != nil {
+		log.Printf("warning: unable to check admin configuration: %v", err)
+	} else if warning != "" {
+		log.Print(warning)
+	}
 
 	go WsHub.Run()
 	log.Printf("Starting server on %s", webPort)

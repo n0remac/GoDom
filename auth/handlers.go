@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -10,27 +11,44 @@ import (
 )
 
 type AuthApp struct {
-	Users    UserRepo
-	Sessions SessionRepo
+	Users        UserRepo
+	Sessions     SessionRepo
+	Registration RegistrationRepo
+	Invites      InviteRepo
 }
 
 func NewAuthApp() *AuthApp {
 	return &AuthApp{
-		Users:    NewInMemoryUserStore(),
-		Sessions: NewSessionStore(),
+		Users:        NewInMemoryUserStore(),
+		Sessions:     NewSessionStore(),
+		Registration: NewInMemoryRegistrationStore(),
+		Invites:      NewInMemoryInviteStore(),
 	}
 }
 
-// Auth mounts auth routes using default in-memory stores (backwards compatible)
+// Auth mounts auth routes using default in-memory stores (backwards compatible).
 func Auth(mux *http.ServeMux, websocketRegistry *CommandRegistry) *AuthApp {
 	app := NewAuthApp()
 	mountAuthHandlers(mux, app)
 	return app
 }
 
-// AuthWithStores mounts auth routes using provided user/session repositories.
+// AuthWithStores mounts auth routes using provided repositories.
 func AuthWithStores(mux *http.ServeMux, websocketRegistry *CommandRegistry, users UserRepo, sessions SessionRepo) *AuthApp {
-	app := &AuthApp{Users: users, Sessions: sessions}
+	registration, ok := users.(RegistrationRepo)
+	if !ok {
+		registration = NewInMemoryRegistrationStore()
+	}
+	invites, ok := users.(InviteRepo)
+	if !ok {
+		invites = NewInMemoryInviteStore()
+	}
+	app := &AuthApp{
+		Users:        users,
+		Sessions:     sessions,
+		Registration: registration,
+		Invites:      invites,
+	}
 	mountAuthHandlers(mux, app)
 	return app
 }
@@ -60,18 +78,55 @@ func (a *AuthApp) LoginPage() *Node {
 	)
 }
 
-func (a *AuthApp) RegisterPage() *Node {
+func (a *AuthApp) RegisterPage(mode RegistrationMode, inviteToken, errorText string) *Node {
+	notice := Nil()
+	if mode == RegistrationClosed {
+		notice = Div(
+			Class("alert alert-warning mb-4"),
+			Text("Registration is currently closed."),
+		)
+	}
+	if errorText != "" {
+		notice = Div(
+			Class("alert alert-error mb-4"),
+			Text(errorText),
+		)
+	}
+
+	registerForm := Div(
+		Class("text-center text-sm text-base-content/70"),
+		Text("Registration is not available right now."),
+	)
+	if mode != RegistrationClosed {
+		inviteField := Nil()
+		if mode == RegistrationInviteOnly {
+			inviteField = Div(
+				Div(Text("Invite Token")),
+				Input(
+					Type("text"),
+					Name("invite_token"),
+					Value(inviteToken),
+					Class("input input-bordered w-full mb-2"),
+					Placeholder("Paste invite token"),
+				),
+			)
+		}
+		registerForm = Form(Method("POST"), Action("/register"),
+			Div(Text("Email")),
+			Input(Type("email"), Name("email"), Class("input input-bordered w-full mb-2")),
+			Div(Text("Password")),
+			Input(Type("password"), Name("password"), Class("input input-bordered w-full mb-2")),
+			inviteField,
+			Button(Type("submit"), Class("btn btn-primary w-full"), Text("Register")),
+		)
+	}
+
 	return DefaultLayout(
 		Div(Class("min-h-screen flex items-center justify-center"),
 			Div(Class("card p-6 w-96"),
 				H2(Text("Register")),
-				Form(Method("POST"), Action("/register"),
-					Div(Text("Email")),
-					Input(Type("email"), Name("email"), Class("input input-bordered w-full mb-2")),
-					Div(Text("Password")),
-					Input(Type("password"), Name("password"), Class("input input-bordered w-full mb-4")),
-					Button(Type("submit"), Class("btn btn-primary w-full"), Text("Register")),
-				),
+				notice,
+				registerForm,
 				Div(Class("mt-4 text-center"), A(Href("/login"), Text("Login"))),
 			),
 		),
@@ -118,23 +173,61 @@ func (a *AuthApp) registerHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			ServeNode(a.RegisterPage())(w, r)
+			mode, err := a.Registration.GetRegistrationMode()
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			ServeNode(a.RegisterPage(mode, r.URL.Query().Get("invite"), ""))(w, r)
 			return
 		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
+			mode, err := a.Registration.GetRegistrationMode()
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
 			email := r.FormValue("email")
 			password := r.FormValue("password")
 			if email == "" || password == "" {
-				http.Error(w, "missing fields", http.StatusBadRequest)
+				ServeNode(a.RegisterPage(mode, r.FormValue("invite_token"), "Email and password are required"))(w, r)
 				return
 			}
-			if _, err := a.Users.CreateUser(email, password); err != nil {
-				http.Error(w, fmt.Sprintf("error: %v", err), http.StatusBadRequest)
+
+			switch mode {
+			case RegistrationClosed:
+				ServeNode(a.RegisterPage(mode, "", "Registration is currently closed"))(w, r)
+				return
+			case RegistrationOpen:
+				if _, err := a.Users.CreateUser(email, password); err != nil {
+					ServeNode(a.RegisterPage(mode, "", fmt.Sprintf("error: %v", err)))(w, r)
+					return
+				}
+			case RegistrationInviteOnly:
+				token := r.FormValue("invite_token")
+				if token == "" {
+					ServeNode(a.RegisterPage(mode, token, "Invite token is required"))(w, r)
+					return
+				}
+				user, err := a.Users.CreateUser(email, password)
+				if err != nil {
+					ServeNode(a.RegisterPage(mode, token, fmt.Sprintf("error: %v", err)))(w, r)
+					return
+				}
+				if err := a.Invites.ConsumeInvite(token, user.ID); err != nil {
+					_ = a.Users.DeleteUser(user.ID)
+					ServeNode(a.RegisterPage(mode, token, inviteErrorText(err)))(w, r)
+					return
+				}
+			default:
+				ServeNode(a.RegisterPage(mode, "", "Registration mode is not configured correctly"))(w, r)
 				return
 			}
+
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		default:
@@ -160,22 +253,48 @@ func (a *AuthApp) logoutHandler() http.HandlerFunc {
 
 func (a *AuthApp) meHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sid, ok := getSessionIDFromRequest(r)
+		user, ok := a.CurrentUser(r)
 		if !ok {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
-			return
-		}
-		sess, ok := a.Sessions.Get(sid)
-		if !ok {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
-			return
-		}
-		user, err := a.Users.GetByID(sess.UserID)
-		if err != nil {
 			http.Error(w, "user not found", http.StatusUnauthorized)
 			return
 		}
-		// Return a small fragment
-		ServeNode(Div(Class("p-4"), Text(fmt.Sprintf("Logged in as %s", user.Email))))(w, r)
+		ServeNode(Div(Class("p-4"), Text(fmt.Sprintf("Logged in as %s (%s)", user.Email, user.Role))))(w, r)
+	}
+}
+
+func (a *AuthApp) CurrentUser(r *http.Request) (*User, bool) {
+	sid, ok := getSessionIDFromRequest(r)
+	if !ok {
+		return nil, false
+	}
+	sess, ok := a.Sessions.Get(sid)
+	if !ok {
+		return nil, false
+	}
+	user, err := a.Users.GetByID(sess.UserID)
+	if err != nil {
+		return nil, false
+	}
+	if user.Role == "" {
+		user.Role = RoleMember
+	}
+	return user, true
+}
+
+func (a *AuthApp) IsAdmin(r *http.Request) bool {
+	user, ok := a.CurrentUser(r)
+	return ok && user.Role == RoleAdmin
+}
+
+func inviteErrorText(err error) string {
+	switch {
+	case errors.Is(err, ErrInviteNotFound):
+		return "Invite token was not found"
+	case errors.Is(err, ErrInviteUsed):
+		return "Invite token has already been used"
+	case errors.Is(err, ErrInviteExpired):
+		return "Invite token has expired"
+	default:
+		return fmt.Sprintf("invite error: %v", err)
 	}
 }
