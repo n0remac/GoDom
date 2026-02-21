@@ -46,6 +46,7 @@ func (s *SQLiteStore) CreateUser(email, password string) (*User, error) {
 }
 
 func (s *SQLiteStore) createUserWithRole(email, password, role string) (*User, error) {
+	email = normalizeEmail(email)
 	role, err := normalizeRole(role)
 	if err != nil {
 		return nil, err
@@ -109,20 +110,36 @@ func (s *SQLiteStore) EnsureAdmin(email, password string) (bool, error) {
 }
 
 func (s *SQLiteStore) GetByEmail(email string) (*User, error) {
+	email = normalizeEmail(email)
 	ctx := context.Background()
 	b, err := s.ds.Get(ctx, emailKey(email))
 	if err != nil {
 		return nil, err
 	}
-	if b == nil {
-		return nil, ErrUserNotFound
+	if b != nil {
+		return s.userFromEmailIndex(email, b)
 	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil {
+
+	// Backfill support for legacy mixed-case records created before email normalization.
+	ids, err := s.listIDsWithPrefix(userPrefix)
+	if err != nil {
 		return nil, err
 	}
-	id := m["id"]
-	return s.GetByID(id)
+	for _, id := range ids {
+		userID := strings.TrimPrefix(id, userPrefix)
+		user, err := s.GetByID(userID)
+		if err != nil {
+			continue
+		}
+		if normalizeEmail(user.Email) != email {
+			continue
+		}
+		_ = s.reindexUserEmail(user, email)
+		user.Email = email
+		return user, nil
+	}
+
+	return nil, ErrUserNotFound
 }
 
 func (s *SQLiteStore) GetByID(id string) (*User, error) {
@@ -408,6 +425,58 @@ func normalizeRole(role string) (string, error) {
 	default:
 		return "", ErrInvalidRole
 	}
+}
+
+func (s *SQLiteStore) userFromEmailIndex(normalizedEmail string, index []byte) (*User, error) {
+	var m map[string]string
+	if err := json.Unmarshal(index, &m); err != nil {
+		return nil, err
+	}
+	id := m["id"]
+	if id == "" {
+		return nil, ErrUserNotFound
+	}
+	user, err := s.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if user.Email != normalizedEmail {
+		_ = s.reindexUserEmail(user, normalizedEmail)
+		user.Email = normalizedEmail
+	}
+	return user, nil
+}
+
+func (s *SQLiteStore) reindexUserEmail(user *User, normalizedEmail string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fresh, err := s.GetByID(user.ID)
+	if err != nil {
+		return err
+	}
+	oldEmail := fresh.Email
+	if oldEmail != normalizedEmail {
+		fresh.Email = normalizedEmail
+		b, err := json.Marshal(fresh)
+		if err != nil {
+			return err
+		}
+		if err := s.ds.Put(context.Background(), userKey(fresh.ID), b); err != nil {
+			return err
+		}
+	}
+	idx, err := json.Marshal(map[string]string{"id": fresh.ID})
+	if err != nil {
+		return err
+	}
+	if err := s.ds.Put(context.Background(), emailKey(normalizedEmail), idx); err != nil {
+		return err
+	}
+	if oldEmail != "" && oldEmail != normalizedEmail {
+		_ = s.ds.Delete(context.Background(), emailKey(oldEmail))
+	}
+	return nil
 }
 
 func isValidRegistrationMode(mode RegistrationMode) bool {

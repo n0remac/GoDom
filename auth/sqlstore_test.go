@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -45,6 +47,86 @@ func TestEnsureAdminBootstrap(t *testing.T) {
 	}
 	if admins != 1 {
 		t.Fatalf("expected 1 admin, got %d", admins)
+	}
+}
+
+func TestSQLiteStoreEmailNormalization(t *testing.T) {
+	s := newTestSQLiteStore(t)
+
+	created, err := s.CreateUser("  User@Example.COM  ", "secret")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if created.Email != "user@example.com" {
+		t.Fatalf("expected normalized email %q, got %q", "user@example.com", created.Email)
+	}
+
+	got, err := s.GetByEmail("USER@EXAMPLE.COM")
+	if err != nil {
+		t.Fatalf("GetByEmail mixed-case: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("expected user ID %q, got %q", created.ID, got.ID)
+	}
+
+	if err := s.VerifyPassword("UsEr@Example.cOm", "secret"); err != nil {
+		t.Fatalf("VerifyPassword mixed-case: %v", err)
+	}
+
+	_, err = s.CreateUser("user@example.com", "another-secret")
+	if !errors.Is(err, ErrUserExists) {
+		t.Fatalf("expected ErrUserExists for case-insensitive duplicate, got %v", err)
+	}
+}
+
+func TestSQLiteStoreGetByEmailMigratesLegacyMixedCaseRecord(t *testing.T) {
+	s := newTestSQLiteStore(t)
+	ctx := context.Background()
+
+	legacy := &User{
+		ID:           "legacy-user",
+		Email:        "Legacy@Example.COM",
+		PasswordHash: []byte("hash"),
+		Role:         RoleMember,
+		CreatedAt:    time.Now(),
+	}
+	userDoc, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy user: %v", err)
+	}
+	if err := s.ds.Put(ctx, userKey(legacy.ID), userDoc); err != nil {
+		t.Fatalf("put legacy user: %v", err)
+	}
+	legacyIndex, err := json.Marshal(map[string]string{"id": legacy.ID})
+	if err != nil {
+		t.Fatalf("marshal legacy index: %v", err)
+	}
+	if err := s.ds.Put(ctx, emailKey(legacy.Email), legacyIndex); err != nil {
+		t.Fatalf("put legacy index: %v", err)
+	}
+
+	got, err := s.GetByEmail("legacy@example.com")
+	if err != nil {
+		t.Fatalf("GetByEmail legacy mixed-case: %v", err)
+	}
+	if got.Email != "legacy@example.com" {
+		t.Fatalf("expected normalized email %q, got %q", "legacy@example.com", got.Email)
+	}
+
+	normalizedIndex, err := s.ds.Get(ctx, emailKey("legacy@example.com"))
+	if err != nil {
+		t.Fatalf("get normalized index: %v", err)
+	}
+	if normalizedIndex == nil {
+		t.Fatalf("expected normalized email index to be created")
+	}
+
+	oldIndex, err := s.ds.Get(ctx, emailKey("Legacy@Example.COM"))
+	if err != nil {
+		t.Fatalf("get old index: %v", err)
+	}
+	if oldIndex != nil {
+		t.Fatalf("expected old mixed-case index to be removed")
 	}
 }
 

@@ -61,6 +61,7 @@ func genID() (string, error) {
 }
 
 func (s *InMemoryUserStore) CreateUser(email, password string) (*User, error) {
+	email = normalizeEmail(email)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.byEmail[email]; ok {
@@ -87,6 +88,7 @@ func (s *InMemoryUserStore) CreateUser(email, password string) (*User, error) {
 }
 
 func (s *InMemoryUserStore) GetByEmail(email string) (*User, error) {
+	email = normalizeEmail(email)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	u, ok := s.byEmail[email]

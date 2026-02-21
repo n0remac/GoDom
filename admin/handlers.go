@@ -29,7 +29,12 @@ func (a *App) Page(adminUser *auth.User) *Node {
 	users, _ := a.Auth.Users.ListUsers()
 
 	return DefaultLayout(
-		Div(Class("min-h-screen p-6 space-y-6"),
+		Attrs(map[string]string{
+			"class":      "min-h-screen bg-base-100 text-base-content",
+			"data-theme": "dark",
+		}),
+		Div(
+			Class("min-h-screen p-6 space-y-6"),
 			Div(Class("card p-6 bg-base-200"),
 				H2(Text("Admin")),
 				P(Text(fmt.Sprintf("Signed in as %s", adminUser.Email))),

@@ -62,6 +62,10 @@ func mountAuthHandlers(mux *http.ServeMux, app *AuthApp) {
 
 func (a *AuthApp) LoginPage() *Node {
 	return DefaultLayout(
+		Attrs(map[string]string{
+			"class":      "flex flex-col items-center min-h-screen",
+			"data-theme": "dark",
+		}),
 		Div(Class("min-h-screen flex items-center justify-center"),
 			Div(Class("card p-6 w-96"),
 				H2(Text("Login")),
@@ -122,6 +126,10 @@ func (a *AuthApp) RegisterPage(mode RegistrationMode, inviteToken, errorText str
 	}
 
 	return DefaultLayout(
+		Attrs(map[string]string{
+			"class":      "flex flex-col items-center min-h-screen",
+			"data-theme": "dark",
+		}),
 		Div(Class("min-h-screen flex items-center justify-center"),
 			Div(Class("card p-6 w-96"),
 				H2(Text("Register")),
@@ -144,7 +152,7 @@ func (a *AuthApp) loginHandler() http.HandlerFunc {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			email := r.FormValue("email")
+			email := normalizeEmail(r.FormValue("email"))
 			password := r.FormValue("password")
 			if email == "" || password == "" {
 				http.Error(w, "missing fields", http.StatusBadRequest)
@@ -191,7 +199,7 @@ func (a *AuthApp) registerHandler() http.HandlerFunc {
 				return
 			}
 
-			email := r.FormValue("email")
+			email := normalizeEmail(r.FormValue("email"))
 			password := r.FormValue("password")
 			if email == "" || password == "" {
 				ServeNode(a.RegisterPage(mode, r.FormValue("invite_token"), "Email and password are required"))(w, r)
